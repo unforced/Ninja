@@ -30,30 +30,49 @@ class RepoGraph
 
   def generate_repo_graph
     repo_info = get_json(@repo_link)
-    base_commit_url = "#{@repo_link}/commits?per_page=100?sha="
+    base_commit_url = "#{@repo_link}/commits?per_page=100&sha="
     branches = get_json(repo_info["branches_url"].fix_link)
     shas = branches.collect{|b| b['commit']['sha']}.uniq
     shas_checked = []
+    #Gathers all the shas that are the head of all the branches first
+    #Then iterate through all of them, going to the commit url
+    #This url shows the previous 100 commits on that branch
+    #Iterate through all of them, skipping if they've been checked and adding
+    #them to shas_checked afterwards.
+    #If there are 100 commits on the page shown, add the last one to the shas
+    #So that it can be checked from there
+    count=0
     until shas.empty?
-      commits = get_json("#{base_commit_url}#{shas.pop}")
-      commits.each do |commit|
-        if commit["committer"]
-          commit_user = commit["committer"]["login"]
-          @graph.add_nodes(commit_user) unless @graph.find_node(commit_user)
-          unless shas_checked.include? commit["sha"]
-            shas_checked << commit["sha"]
-            if commit["commit"]["comment_count"] > 0
-              comments = get_json(commit["comments_url"])
-              comments.each do |comment|
-                comment_user = comment["user"]["login"]
-                @graph.add_nodes(comment_user) unless @graph.find_node(comment_user)
-                @graph.add_edges(commit_user, comment_user) unless commit_user==comment_user
+      if !shas_checked.include?(sha=shas.pop)
+        commits = get_json("#{base_commit_url}#{sha}")
+        commits.each_with_index do |commit, index|
+          if index==99
+            shas << commit["sha"]
+          else
+            unless shas_checked.include? commit["sha"]
+              count+=1
+              if commit["committer"]
+                commit_user = commit["committer"]["login"]
+              else
+                commit_user = commit["commit"]["committer"]["email"]
+              end
+              @graph.add_nodes(commit_user) unless @graph.find_node(commit_user)
+              shas_checked << commit["sha"]
+              if commit["commit"]["comment_count"] > 0
+                comments = get_json(commit["comments_url"])
+                comments.each do |comment|
+                  comment_user = comment["user"]["login"]
+                  @graph.add_nodes(comment_user) unless @graph.find_node(comment_user)
+
+                  @graph.add_edges(commit_user, comment_user) unless commit_user==comment_user
+                end
               end
             end
           end
         end
       end
     end
+    puts count
   end
 end
 
