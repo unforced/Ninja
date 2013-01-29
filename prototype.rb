@@ -2,6 +2,7 @@ require 'open-uri' #Allows url's to be opened as files
 require 'json' #Github API stores data as JSON
 require 'rubygems'
 require 'igraph'
+require 'github_api'
 
 #A lot of this still needs many more comments.
 
@@ -17,6 +18,7 @@ REPOS_LINK = "#{API_LINK}/repos"
 class RepoGraph
   attr_accessor :graph
   def initialize(user, repo)
+    @github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
     @user = user
     @repo = repo
     @repo_link = "#{REPOS_LINK}/#{user}/#{repo}"
@@ -24,18 +26,18 @@ class RepoGraph
     generate_repo_graph
   end
 
+  def get_json_query(query)
+    JSON.parse `bq --format json -q query "#{query}"`
+  end
+
   def get_json(link)
-    @@pagelookups+=1
-    clock=Time.now
     #Reads in a link to the github API, passing OAUTH token to authenticate
     #Then parses it with JSON and returns the result
     begin
-      x=JSON.parse(open(link, "Authorization" => "token f9badac33670497d4e60040948f9bb66c9801705").read)
+      x=JSON.parse(open(link, "Authorization" => "token d72762df620b07c1ca9dab8b62b3935087d71e1c").read)
     rescue OpenURI::HTTPError #Occasionally throws a 502 error, usually fixed by just trying again
       retry
     end
-    @@lookuptime+=Time.now-clock
-    x
   end
 
   def generate_repo_graph
@@ -48,7 +50,7 @@ class RepoGraph
   #vertices and edges for them.
   def comments_proc(user)
     Proc.new do |comment|
-      comment_user = comment["user"]["login"]
+      comment_user = comment.user.login
       @graph.add_vertex(comment_user)
       if @graph.are_connected(user, comment_user)
         #If the edge exists, just add 1 to weight
@@ -64,18 +66,17 @@ class RepoGraph
 
   def generate_pulls_issues_graph
     #Gets all issues and pulls(github stores them together)
-    open_pulls_url = "#{@repo_link}/issues?per_page=100&state=open&page="
-    page=1
-    until (pulls=get_json("#{open_pulls_url}#{page}")).empty?
-      pulls.each do |pull|
-        pull_submitter = pull["user"]["login"]
+    all_pulls = @github.pull_requests.list(@user, @repo, state: "closed", per_page: 100)
+    pulls.each_page do |page|
+      page.each do |pull|
+        pull_submitter = pull.user.login
         @graph.add_vertex(pull_submitter)
-        comments = get_json(pull["comments_url"])
+        comments = @github.pull_requests.comments.list(@user,@repo,request_id: pull.number)
         pull_comments_proc=comments_proc(pull_submitter)
-        comments.each(&pull_comments_proc) #Passes pull_comments_proc as block.
-        if pull["state"]=="closed"
-          issue = get_json(pull["url"])
-          closer = issue["closed_by"]["login"]
+        comments.each_page{|page| page.each(&pull_comments_proc)} #Passes pull_comments_proc as block.
+        if pull.state=="closed"
+          issue = @github.issues.get(@user, @repo, pull.number)
+          closer = issue.closed_by.login
           @graph.add_vertex(closer)
           if @graph.are_connected(pull_submitter, closer)
             #If the edge exists, just add 1 to weight
@@ -93,10 +94,15 @@ class RepoGraph
   end
 
   def generate_commit_graph
-    base_commit_url = "#{@repo_link}/commits?per_page=100&sha="
-    branches = get_json(@repo_info["branches_url"].fix_link)
-    shas = branches.collect{|b| b['commit']['sha']}.uniq
-    shas_checked = []
+    commits = @github.repos.commits.list(@user, @repo, per_page: 100)
+    commits.each_page do |page|
+      page.each do |commit|
+        committer = commit.committer ? commit.committer.login : commit.commit.commiter.email
+        @graph.add_vertex(committer)
+        comments=@github.repo.comments.list(@user, @repo, sha: commit.sha)
+        commit_comments
+
+
     #Gathers all the shas that are the head of all the branches first
     #Then iterate through all of them, going to the commit url
     #This url shows the previous 100 commits on that branch
@@ -104,21 +110,6 @@ class RepoGraph
     #them to shas_checked afterwards.
     #If there are 100 commits on the page shown, add the last one to the shas
     #So that it can be checked from there
-    until shas.empty?
-      if !shas_checked.include?(sha=shas.pop)
-        @@commit_pages += 1
-        commits = get_json("#{base_commit_url}#{sha}")
-        commits.each_with_index do |commit, index|
-          if index==99
-            shas << commit["sha"]
-          else
-            unless shas_checked.include? commit["sha"]
-              @@count+=1
-              if commit["committer"]
-                commit_user = commit["committer"]["login"]
-              else
-                commit_user = commit["commit"]["committer"]["email"]
-              end
               @graph.add_vertex(commit_user)
               shas_checked << commit["sha"]
               @@comment_pages+=1
