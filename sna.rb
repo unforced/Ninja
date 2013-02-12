@@ -2,8 +2,8 @@ require 'rubygems'
 require 'open-uri' #Allows url's to be opened as files
 require 'json' #Github API stores data as JSON
 require 'github_api'
-require 'graphviz' #Allows graph visualization(Helps for debugging)
 require 'optparse'
+require 'igraph'
 
 options={}
 OptionParser.new do |opts|
@@ -19,7 +19,7 @@ OptionParser.new do |opts|
     options[:user], options[:repo] = r.split('/')
   end
 
-  opts.on("--output [OUTPUTFILE]", String, "File to output to(defaults to sample.png)") do |o|
+  opts.on("--output [OUTPUTFILE]", String, "File to output to(defaults to sample.graphml)") do |o|
     options[:output] = o
   end
 
@@ -29,6 +29,8 @@ OptionParser.new do |opts|
   end
 end.parse!
 
+options[:output]||="sample.graphml"
+
 class RepoGraph
   MAX_REPOS=100000
   attr_accessor :graph
@@ -36,7 +38,7 @@ class RepoGraph
     @github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
     @user = user
     @repo = repo
-    @graph = GraphViz.new(:G)
+    @graph = IGraph.new([],false)
     generate_repo_graph
   end
 
@@ -58,7 +60,7 @@ class RepoGraph
   #Processes approximately 12GB($0.40) of data
   def self.get_top_repos_info(repo_name="top_repos")
     query = <<-EOF
-    SELECT actor, payload_action, type, payload_commit, payload_issue_id, payload_number, url, repository_url, repository_name, repository_owner
+    SELECT actor, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
     FROM [githubarchive:github.timeline]
     WHERE repository_url IN (SELECT repository_url FROM mygithubarchives.top_repos)
     AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
@@ -129,7 +131,14 @@ class RepoGraph
   end
 
   def make_edge(u1, u2)
-    @graph.add_edges(u1,u2) if u1 && u2
+    u1={"name"=>u1}
+    u2={"name"=>u2}
+    @graph.add_vertices([u1,u2])
+    if @graph.are_connected(u1,u2)
+      @graph.set_edge_attr(u1,u2,{"weight"=>@graph.get_edge_attr(u1,u2)["weight"]+1})
+    else
+      @graph.add_edges([u1,u2],[{"weight"=>1}])
+    end
   end
 end
 
@@ -140,5 +149,5 @@ end
 
 if options[:query]
   g=RepoGraph.new(options[:user], options[:repo])
-  g.graph.output(png: options[:output]||"sample.png")
+  g.graph.write_graph_graphml(File.open(options[:output],'w'))
 end
