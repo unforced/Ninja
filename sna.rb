@@ -19,7 +19,7 @@ OptionParser.new do |opts|
     options[:user], options[:repo] = r.split('/')
   end
 
-  opts.on("--output [OUTPUTFILE]", String, "File to output to(defaults to sample.graphml)") do |o|
+  opts.on("--output [OUTPUTFILE]", String, "File to output to(defaults to default.graphml)") do |o|
     options[:output] = o
   end
 
@@ -29,7 +29,7 @@ OptionParser.new do |opts|
   end
 end.parse!
 
-options[:output]||="sample.graphml"
+options[:output]||="default.graphml"
 
 class RepoGraph
   MAX_REPOS=100000
@@ -83,17 +83,18 @@ class RepoGraph
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
     @repo_info=get_json_query(query).group_by{|e| e["type"]}
-    commit_comments = @repo_info["CommitCommentEvent"] || []
+    @repo_info.default=[] #Stops it from crashing if there aren't any of a given type
+    commit_comments = @repo_info["CommitCommentEvent"]
     #Get all the shas and commits first, and make them uniq, to prevent
     #retrieving the same one multiple times
-    shas = commit_comments.collect{|c| c["payload_commit"]}.uniq || []
+    shas = commit_comments.collect{|c| c["payload_commit"]}.uniq
     commits = shas.collect do |sha|
       begin
         @github.repos.commits.get(@user, @repo, sha)
       rescue
         nil
       end
-    end.compact.uniq || []
+    end.compact.uniq
     commit_users = {}
     #Sorts the commits by sha for quick retrieval
     commits.each do |c|
@@ -111,20 +112,21 @@ class RepoGraph
 
     #Pull down all the issues and events at the same time, because we handle
     #them the same way
-    issues_pulls = (@repo_info["IssuesEvent"] || []) + (@repo_info["PullRequestEvent"] || [])
+    issues_pulls = @repo_info["IssuesEvent"] + @repo_info["PullRequestEvent"]
     #Group the issues and pulls by payload_action because we will be handling
     #closed ones and opened ones differently, and they need to reference
     #each other
     coip = issues_pulls.group_by{|ip| ip["payload_action"]}
+    coip.default = []
     open_users={}
-    coip["opened"].each{|o| open_users[o["payload_number"]]=o["actor"]} if coip["opened"]
-    coip["closed"].each{|c| make_edge(c["actor"], open_users[c["payload_number"]])} if coip["closed"]
-    issue_comments = @repo_info["IssueCommentEvent"] || []
+    coip["opened"].each{|o| open_users[o["payload_number"]]=o["actor"]}
+    coip["closed"].each{|c| make_edge(c["actor"], open_users[c["payload_number"]])}
+    issue_comments = @repo_info["IssueCommentEvent"]
     #Have to retrieve payload number from url for next two because it does not show up normally
     issue_comments.each do |ic|
       make_edge(ic["actor"], open_users[ic["url"].match(/\/issues\/(\d+)#/)[1]])
     end
-    pr_comments = @repo_info["PullRequestReviewCommentEvent"] || []
+    pr_comments = @repo_info["PullRequestReviewCommentEvent"]
     pr_comments.each do |pc|
       make_edge(pc["actor"], open_users[pc["url"].match(/\/pull\/(\d+)#/)[1]])
     end
