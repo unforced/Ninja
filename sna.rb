@@ -9,15 +9,26 @@ require 'igraph'
 
 options={}
 OptionParser.new do |opts|
-  opts.banner = "Usage: prototype.rb [options]"
+  opts.banner = "Usage: ./sna.rb [options]"
 
-  opts.on("-u", "--update_rubinius", "Updates rubinius repo in BigQuery") do
-    options[:update]=true
+  opts.on("--update_rubinius", "Updates rubinius repo in BigQuery") do
+    options[:update] = true
   end
 
-  opts.on("-q", "--query", "Queries rubinius repo") do
-    options[:query]=true
-    options[:month]||=0
+  opts.on("--update_n [NUMBER_REPOS]", Integer, "Updates the top N repositories(default 100)") do |n|
+    options[:update] = n || 100
+  end
+
+  opts.on("-r", "--rubinius", "Queries rubinius repo") do
+    options[:query] = true
+    options[:rubinius] = true
+    options[:month] ||= 0
+  end
+
+  opts.on("-n", "--number [NUMBER_REPOS]", Integer, "Query the top N repositories(default 100)") do |n|
+    options[:query] = true
+    options[:number] = n || 100
+    options[:month] ||= 0
   end
 
   opts.on("-m", "--month [MONTHS]", Integer, "Query monthly snapshots MONTHS times(default 12)") do |m|
@@ -41,18 +52,20 @@ class RepoGraph
     #repo. This will be changed back later to allow any repo
     query = <<-EOF
     SELECT *
-    FROM [mygithubarchives.rubinius_info]
+    FROM [mygithubarchives.top_repo_info]
+    WHERE repository_owner='#{user}' AND repository_name='#{repo}';
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
-    @repo_info=get_json_query(query)
+    @repo_info=RepoGraph.get_json_query(query)
+    Dir.mkdir("#{@user}_#{@repo}")
     0.upto(month) do |m|
       generate_repo_graph(m)
     end
   end
 
-  def self.get_rubinius_info
+  def self.update_rubinius
     query = <<-EOF
-    SELECT actor, payload_action, type, payload_commit, payload_number, url, created_at
+    SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
     FROM [githubarchive:github.timeline]
     WHERE repository_name='rubinius' AND repository_owner='rubinius'
     AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
@@ -61,9 +74,52 @@ class RepoGraph
     `bq query --destination_table=mygithubarchives.rubinius_info "#{query}"`
   end
 
-  def get_json_query(query)
+  #Retrieves the url's of the top 100 repositories
+  #Retrieves all necessary info on the top repositories
+  #Processes approximately 15GB of data
+  def self.update_top(n)
+    query = <<-EOF
+    SELECT repository_url, repository_name, repository_owner, MAX(repository_forks) as num_forks
+    FROM [githubarchive:github.timeline]
+    WHERE repository_name!='' AND repository_owner!=''
+    GROUP BY repository_url, repository_name, repository_owner
+    ORDER BY num_forks DESC
+    LIMIT #{n};
+    EOF
+    `bq rm -f mygithubarchives.top_repos`
+    `bq query --destination_table=mygithubarchives.top_repos "#{query}"`
+    query2 = <<-EOF
+    SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
+    FROM [githubarchive:github.timeline]
+    WHERE repository_url IN (SELECT repository_url FROM mygithubarchives.top_repos)
+    AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
+    EOF
+    `bq rm -f mygithubarchives.top_repo_info`
+    `bq query --destination_table=mygithubarchives.top_repo_info "#{query2}"`
+  end
+
+  def self.get_top(n, m)
+    query = <<-EOF
+    SELECT repository_url, repository_name, repository_owner, num_forks
+    FROM [mygithubarchives.top_repos]
+    ORDER BY num_forks DESC
+    LIMIT #{n}
+    EOF
+    top=RepoGraph.get_json_query(query)
+    top.each do |r|
+      RepoGraph.new(r["repository_owner"], r["repository_name"], m)
+      puts "Finished #{repository_owner}_#{repository_name}"
+    end
+  end
+
+  def self.get_json_query(query)
     #Makes the call to big query and parses the JSON returned
-    JSON.parse `bq --format json -q query --max_rows #{MAX_REPOS} "#{query}"`
+    begin
+      JSON.parse `bq --format json -q query --max_rows #{MAX_REPOS} "#{query}"`
+    rescue
+      puts query
+      exit
+    end
   end
 
   def generate_repo_graph(month)
@@ -117,7 +173,7 @@ class RepoGraph
     pr_comments.each do |pc|
       make_edge(graph, pc["actor"], open_users[pc["url"].match(/\/pull\/(\d+)#/)[1]])
     end
-    graph.write_graph_graphml(File.open("#{@user}_#{@repo}_#{month}.graphml", 'w'))
+    graph.write_graph_graphml(File.open("#{@user}_#{@repo}/#{@user}_#{@repo}_#{month}.graphml", 'w'))
   end
 
   def make_edge(graph, u1, u2)
@@ -133,9 +189,21 @@ class RepoGraph
 end
 
 if options[:update]
-  RepoGraph.get_rubinius_info
+  if options[:update].class == Fixnum
+    RepoGraph.update_top(options[:update])
+  elsif options[:update] == :rubinius
+    RepoGraph.update_rubinius
+  else
+    raise ArgumentError
+  end
 end
 
 if options[:query]
-  g=RepoGraph.new("rubinius", "rubinius", options[:month])
+  if options[:rubinius]
+    RepoGraph.new("rubinius", "rubinius", options[:month])
+  elsif options[:number]
+    RepoGraph.get_top(options[:number], options[:month])
+  else
+    raise ArgumentError
+  end
 end
