@@ -3,6 +3,7 @@
 require 'optparse'
 require 'csv'
 
+VERBOSE=false
 options={}
 OptionParser.new do |opts|
   opts.banner = "Usage: ./event-stream.rb [options]"
@@ -16,7 +17,7 @@ OptionParser.new do |opts|
   end
 
   opts.on("-v", "Verbose") do
-    options[:v]=true
+    VERBOSE=true
   end
 
   opts.on_tail("-h", "--help", "Show this help message") do
@@ -24,6 +25,10 @@ OptionParser.new do |opts|
     exit
   end
 end.parse!
+
+def vputs(s)
+  puts s if options[:v]
+end
 
 def update_top(n)
   query = <<-EOF
@@ -48,16 +53,21 @@ JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
 ORDER BY forks DESC, id ASC, timestamp ASC;
   EOF
   puts "Beginning event_stream query"
-  x = CSV.parse(`bq --format csv -q query --max_rows 99999999 "#{query}"`).collect do |a|
-    begin
-      a[0..0]+a[2..-1]
-    rescue
-      puts "ERROR"
-      p a
-      exit
+  clock = Time.now
+  csvoutput = `bq --format csv -q query --max_rows 99999999 "#{query}"`
+  puts "Finished query in #{Time.now-clock}"
+  puts "Parsing CSV"
+  clock = Time.now
+  x = CSV.parse(csvoutput)
+  puts "Finished parsing in #{Time.now-clock}"
+  puts "Writing to file"
+  clock = Time.now
+  CSV.open("event-stream-#{n}.csv", 'w') do |csv|
+    x.each do |a|
+      csv << (a[0..0]+a[2..-1])
     end
   end
-  File.open("event-stream-#{n}.csv", 'w'){|f| f.puts `bq --format csv -q query --max_rows 99999999 "#{query}"`}
+  puts "Finished writing in #{Time.now-clock}"
 end
 
 num = options[:n] || 100
