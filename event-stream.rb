@@ -2,6 +2,7 @@
 
 require 'optparse'
 require 'csv'
+require 'json'
 
 options={}
 OptionParser.new do |opts|
@@ -33,7 +34,7 @@ def update_top(n)
   query = <<-EOF
 SELECT repository_url, MAX(repository_forks) as num_forks
 FROM [githubarchive:github.timeline]
-WHERE repository_name!='' AND repository_owner!=''
+WHERE repository_name!='' AND repository_owner!='' AND MONTH(TIMESTAMP(created_at)) == 3 AND YEAR(TIMESTAMP(created_at)) == 2012
 GROUP BY repository_url
 ORDER BY num_forks DESC
 LIMIT #{n};
@@ -47,30 +48,38 @@ end
 
 def get_fork_stream(n)
   query = <<-EOF
-SELECT T.repository_url AS id, M.num_forks AS max_forks, MONTH(TIMESTAMP(T.created_at)) AS month,
-YEAR(TIMESTAMP(T.created_at)) AS year, MIN(T.repository_forks) AS forks
+SELECT T.repository_url AS url, M.num_forks AS max_forks, MONTH(TIMESTAMP(T.created_at)) AS month,
+YEAR(TIMESTAMP(T.created_at)) AS year, MAX(T.repository_forks) AS forks
 FROM githubarchive:github.timeline AS T
 JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
-GROUP BY id, max_forks, year, month
-ORDER BY max_forks DESC, id ASC, year DESC, month DESC;
+GROUP BY url, max_forks, year, month
+ORDER BY max_forks DESC, url ASC, year DESC, month DESC;
   EOF
   puts "Beginning fork_stream query"
   clock = Time.now
-  csvoutput = `bq --format csv -q query --max_rows 99999999 "#{query}"`
+  output = `bq --format json -q query --max_rows 99999999 "#{query}"`
   puts "Finished query in #{Time.now-clock}"
-  puts "Parsing CSV"
+  puts "Parsing JSON"
   clock = Time.now
-  x = CSV.parse(csvoutput)
+  x = JSON.parse(output).group_by{|a| a["url"]}
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
   clock = Time.now
   CSV.open("fork-stream-#{n}.csv", 'w') do |csv|
-    x.each_with_index do |a,i|
-      if i==0
-        csv << [a[0], "timestamp", a[4]]
-      else
-        csv << [a[0], Time.new(a[3],a[2]), a[4]]
+    monthsyears = x.values.max_by{|a| a.length}.collect{|a| [a["month"],a["year"]]}.reverse
+    csv << ["url"] + monthsyears.collect{|a| a.join("/")}
+    x.each do |k,v|
+      i=0
+      v = v.reverse
+      forks = monthsyears.collect do |a|
+        if v[i] && a[0]==v[i]["month"] && a[1]==v[i]["year"]
+          i+=1
+          v[i-1]["forks"]
+        else
+          "N/A"
+        end
       end
+      csv << [k.match(/https:\/\/github.com\/(.*)/)[1]] + forks
     end
   end
   puts "Finished writing in #{Time.now-clock}"
