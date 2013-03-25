@@ -88,24 +88,34 @@ end
 
 def get_event_stream(n)
   query = <<-EOF
-SELECT T.repository_url AS id, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
-FROM githubarchive:github.timeline AS T
-JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
-ORDER BY forks DESC, id ASC, timestamp ASC;
+SELECT T.repository_url AS url, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
+FROM publicdata:samples.github_timeline AS T
+JOIN mygithubarchives.sample_top_repos AS M ON T.repository_url=M.repository_url
+ORDER BY forks DESC, url ASC, timestamp ASC;
   EOF
   puts "Beginning event_stream query"
   clock = Time.now
-  csvoutput = `bq --format csv -q query --max_rows 99999999 "#{query}"`
+  output = `bq --format json -q query --max_rows 99999999 "#{query}"`
   puts "Finished query in #{Time.now-clock}"
-  puts "Parsing CSV"
+  puts "Parsing JSON"
   clock = Time.now
-  x = CSV.parse(csvoutput)
+  x = JSON.parse(output).group_by{|a| a["url"]}
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
   clock = Time.now
   CSV.open("event-stream-#{n}.csv", 'w') do |csv|
-    x.each do |a|
-      csv << (a[0..0]+a[2..-1])
+    csv << x.collect{|k,v| ["#{k}_events", "#{k}_timestamps"]}.flatten
+    loop do
+      b = x.collect do |k,v|
+        a = v.shift
+        if a.nil?
+          []
+        else
+          [a["event"], a["timestamp"]]
+        end
+      end.flatten
+      break if b.empty?
+      csv << b
     end
   end
   puts "Finished writing in #{Time.now-clock}"
