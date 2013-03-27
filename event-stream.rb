@@ -3,6 +3,7 @@
 require 'optparse'
 require 'csv'
 require 'json'
+require 'date'
 
 options={}
 OptionParser.new do |opts|
@@ -89,8 +90,8 @@ end
 def get_event_stream(n)
   query = <<-EOF
 SELECT T.repository_url AS url, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
-FROM publicdata:samples.github_timeline AS T
-JOIN mygithubarchives.sample_top_repos AS M ON T.repository_url=M.repository_url
+FROM githubarchive:github.timeline AS T
+JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
 ORDER BY forks DESC, url ASC, timestamp ASC;
   EOF
   puts "Beginning event_stream query"
@@ -99,22 +100,33 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
   puts "Finished query in #{Time.now-clock}"
   puts "Parsing JSON"
   clock = Time.now
-  x = JSON.parse(output).group_by{|a| a["url"]}
+  x = JSON.parse(output)
+  output = nil #Allows that memory to be garbage collected
+  GC.start #Force it to be garbage collected, to get that giant string(Hundreds of millions of chars) out of memory.
+  puts "Finish first parse"
+  puts "Length: #{x.length}"
+  x = x.group_by do |row|
+    t = Date.parse(row["timestamp"])
+    repo = row["url"].match(/https:\/\/github.com\/(.*)/)[1]
+    "#{repo}_#{t.year}_#{t.month}"
+  end
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
   clock = Time.now
   CSV.open("event-stream-#{n}.csv", 'w') do |csv|
-    csv << x.collect{|k,v| ["#{k}_events", "#{k}_timestamps"]}.flatten
+    csv << x.collect do |k,v|
+      ["#{k}_events", "#{k}_timestamps"]
+    end.flatten
     loop do
       b = x.collect do |k,v|
         a = v.shift
         if a.nil?
-          []
+          [nil,nil]
         else
           [a["event"], a["timestamp"]]
         end
       end.flatten
-      break if b.empty?
+      break if b.compact.empty?
       csv << b
     end
   end
@@ -122,6 +134,7 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
 end
 
 num = options[:n] || 100
+
 update_top(num) if options[:u]
 get_fork_stream(num) if options[:f]
 get_event_stream(num) if options[:e]
