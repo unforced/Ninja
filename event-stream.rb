@@ -25,6 +25,14 @@ OptionParser.new do |opts|
     options[:m]=true
   end
 
+  opts.on("-l", "Limit to Push, PullRequest, Issue events") do
+    options[:l]=true
+  end
+
+  opts.on("-t", "Include timestamps for event stream") do
+    options[:t]=true
+  end
+
   opts.on("-f", "Queries for fork stream") do
     options[:f]=true
   end
@@ -91,11 +99,12 @@ ORDER BY max_forks DESC, url ASC, year DESC, month DESC;
 end
 
 
-def get_event_stream(n,m=false)
+def get_event_stream(n,m=false,l=false,t=false)
   query = <<-EOF
 SELECT T.repository_url AS url, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
 FROM githubarchive:github.timeline AS T
 JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
+#{"WHERE T.type='PushEvent' OR T.type='PullRequestEvent' OR T.type='IssuesEvent'" if l}
 ORDER BY forks DESC, url ASC, timestamp ASC;
   EOF
   puts "Beginning event_stream query"
@@ -121,17 +130,32 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
   clock = Time.now
-  CSV.open("event-stream-#{n}.csv", 'w') do |csv|
+  filename = "event-stream-#{n}"
+  filename += "-t" if t
+  filename += "-l" if l
+  CSV.open("#{filename}.csv", 'w') do |csv|
     csv << x.collect do |k,v|
-      ["#{k}_events", "#{k}_timestamps"]
+      if t
+        ["#{k}_events", "#{k}_timestamps"]
+      else
+        "#{k}_events"
+      end
     end.flatten
     loop do
       b = x.collect do |k,v|
         a = v.shift
-        if a.nil?
-          [nil,nil]
+        if t
+          if a.nil?
+            [nil,nil]
+          else
+            [a["event"], a["timestamp"]]
+          end
         else
-          [a["event"], a["timestamp"]]
+          if a.nil?
+            nil
+          else
+            a["event"]
+          end
         end
       end.flatten
       break if b.compact.empty?
@@ -145,6 +169,5 @@ num = options[:n] || 100
 
 update_top(num) if options[:u]
 get_fork_stream(num) if options[:f]
-get_event_stream(num, options[:m]) if options[:e]
+get_event_stream(num, options[:m], options[:l], options[:t]) if options[:e]
 GC.start
-puts "It should really exit now"
