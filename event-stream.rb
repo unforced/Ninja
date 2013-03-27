@@ -21,6 +21,10 @@ OptionParser.new do |opts|
     options[:e]=true
   end
 
+  opts.on("-m", "Split event stream by months") do
+    options[:m]=true
+  end
+
   opts.on("-f", "Queries for fork stream") do
     options[:f]=true
   end
@@ -87,7 +91,7 @@ ORDER BY max_forks DESC, url ASC, year DESC, month DESC;
 end
 
 
-def get_event_stream(n)
+def get_event_stream(n,m=false)
   query = <<-EOF
 SELECT T.repository_url AS url, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
 FROM githubarchive:github.timeline AS T
@@ -106,9 +110,13 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
   puts "Finish first parse"
   puts "Length: #{x.length}"
   x = x.group_by do |row|
-    t = Date.parse(row["timestamp"])
     repo = row["url"].match(/https:\/\/github.com\/(.*)/)[1]
-    "#{repo}_#{t.year}_#{t.month}"
+    if m
+      t = Date.parse(row["timestamp"])
+      "#{repo}_#{t.year}_#{t.month}"
+    else
+      repo
+    end
   end
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
@@ -137,4 +145,6 @@ num = options[:n] || 100
 
 update_top(num) if options[:u]
 get_fork_stream(num) if options[:f]
-get_event_stream(num) if options[:e]
+get_event_stream(num, options[:m]) if options[:e]
+GC.start
+puts "It should really exit now"
