@@ -133,6 +133,7 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
   filename = "event-stream-#{n}"
   filename += "-t" if t
   filename += "-l" if l
+  filename += "-m" if m
   CSV.open("#{filename}.csv", 'w') do |csv|
     csv << x.collect do |k,v|
       if t
