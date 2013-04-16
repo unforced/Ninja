@@ -1,8 +1,6 @@
 #!/usr/bin/env ruby
 
-require 'rubygems'
-require 'open-uri' #Allows url's to be opened as files
-require 'json' #Github API stores data as JSON
+require 'google/api_client'
 require 'github_api'
 require 'optparse'
 require 'igraph'
@@ -12,7 +10,7 @@ OptionParser.new do |opts|
   opts.banner = "Usage: ./sna.rb [options]"
 
   opts.on("--update_rubinius", "Updates rubinius repo in BigQuery") do
-    options[:update] = true
+    options[:update] = :rubinius
   end
 
   opts.on("--update_n [NUMBER_REPOS]", Integer, "Updates the top N repositories(default 100)") do |n|
@@ -46,18 +44,29 @@ class RepoGraph
   attr_accessor :graph
   def initialize(user, repo, month)
     @github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
+    @client = Google::APIClient.new(application_name: "SNA", application_version: "0.5")
+    @bq = @client.discovered_api("bigquery", "v2")
+    key = Google::APIClient::PKCS12.load_key("client.p12", "notasecret")
+    @client.authorization = Signet::OAuth2::Client.new(token_credential_uri: 'https://accounts.google.com/o/oauth2/token',
+                                                       audience: 'https://accounts.google.com/o/oauth2/token',
+                                                       scope: 'https://www.googleapis.com/auth/bigquery',
+                                                       issuer: '1017723978940@developer.gserviceaccount.com',
+                                                       signing_key: key)
+    @client.authorization.fetch_access_token!
     @user = user
     @repo = repo
+    @users = {}
+    @uid = 0
     #This query will use <1MB of data and retrieve all the info on our given
     #repo. This will be changed back later to allow any repo
     query = <<-EOF
     SELECT *
-    FROM [mygithubarchives.top_repo_info]
+    FROM [mygithubarchives.rubinius_info]
     WHERE repository_owner='#{user}' AND repository_name='#{repo}';
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
-    @repo_info=RepoGraph.get_json_query(query)
-    Dir.mkdir("#{@user}_#{@repo}")
+    @repo_info, @repo_schema = get_json_query(query)
+    Dir.mkdir("#{@user}_#{@repo}") unless File.exists?("#{@user}_#{@repo}")
     0.upto(month) do |m|
       generate_repo_graph(m)
     end
@@ -105,32 +114,51 @@ class RepoGraph
     ORDER BY num_forks DESC
     LIMIT #{n}
     EOF
-    top=RepoGraph.get_json_query(query)
+    top=get_json_query(query)
     top.each do |r|
       RepoGraph.new(r["repository_owner"], r["repository_name"], m)
       puts "Finished #{repository_owner}_#{repository_name}"
     end
   end
 
-  def self.get_json_query(query)
+  #Schema:
+  #[actor, created_at, payload_action, payload_commit, payload_number,
+  #repository_name, repository_owner, repository_url, type, url]
+  def get_json_query(query)
     #Makes the call to big query and parses the JSON returned
-    begin
-      JSON.parse `bq --format json -q query --max_rows #{MAX_REPOS} "#{query}"`
-    rescue
-      puts query
-      exit
+    data = @client.execute(api_method: @bq.jobs.query, body_object: {query: query},
+                           parameters: {projectId: "githubsna"}).data
+    puts "Used #{data["total_bytes_processed"]} bytes of data"
+    puts "Returned #{data["total_rows"]} rows"
+    schema = {}
+    data.schema.fields.each_with_index do |f,i|
+      schema[f.name]=i
     end
+    [data.rows, schema]
+  end
+
+  def r(query_result, key)
+    query_result.f[@repo_schema[key]].v
   end
 
   def generate_repo_graph(month)
     graph = IGraph.new([],false)
-    monthly_repo_info = @repo_info.select{|e| Date.parse(e["created_at"]) <
-      Date.today.prev_month(month)}.group_by{|e| e["type"]}
+    #Initialize nodes first
+    graph.add_vertices(@users.values)
+    monthly_repo_info = @repo_info.select do |e|
+      begin
+        Date.parse(r(e,"created_at")) <
+        Date.today.prev_month(month)
+      rescue
+        p e
+        exit
+      end
+    end.group_by{|e| r(e,"type")}
     monthly_repo_info.default=[]
     commit_comments = monthly_repo_info["CommitCommentEvent"]
     #Get all the shas and commits first, and make them uniq, to prevent
     #retrieving the same one multiple times
-    shas = commit_comments.collect{|c| c["payload_commit"]}.uniq
+    shas = commit_comments.collect{|c| r(c, "payload_commit")}.uniq
     commits = shas.collect do |sha|
       begin
         @github.repos.commits.get(@user, @repo, sha)
@@ -150,7 +178,7 @@ class RepoGraph
     #Iterate through all comments, making an edge between the comment creator
     #and the committer
     commit_comments.each do |cc|
-      make_edge(graph, cc["actor"], commit_users[cc["payload_commit"]])
+      make_edge(graph, r(cc,"actor"), commit_users[r(cc,"payload_commit")])
     end
 
     #Pull down all the issues and events at the same time, because we handle
@@ -159,26 +187,29 @@ class RepoGraph
     #Group the issues and pulls by payload_action because we will be handling
     #closed ones and opened ones differently, and they need to reference
     #each other
-    coip = issues_pulls.group_by{|ip| ip["payload_action"]}
+    coip = issues_pulls.group_by{|ip| r(ip,"payload_action")}
     coip.default = []
     open_users={}
-    coip["opened"].each{|o| open_users[o["payload_number"]]=o["actor"]}
-    coip["closed"].each{|c| make_edge(graph, c["actor"], open_users[c["payload_number"]])}
+    coip["opened"].each{|o| open_users[r(o,"payload_number")]=r(o,"actor")}
+    coip["closed"].each{|c| make_edge(graph, r(c,"actor"), open_users[r(c,"payload_number")])}
     issue_comments = monthly_repo_info["IssueCommentEvent"]
     #Have to retrieve payload number from url for next two because it does not show up normally
     issue_comments.each do |ic|
-      make_edge(graph, ic["actor"], open_users[ic["url"].match(/\/issues\/(\d+)#/)[1]])
+      make_edge(graph, r(ic,"actor"), open_users[r(ic,"url").match(/\/issues\/(\d+)#/)[1]])
     end
     pr_comments = monthly_repo_info["PullRequestReviewCommentEvent"]
     pr_comments.each do |pc|
-      make_edge(graph, pc["actor"], open_users[pc["url"].match(/\/pull\/(\d+)#/)[1]])
+      make_edge(graph, r(pc,"actor"), open_users[r(pc,"url").match(/\/pull\/(\d+)#/)[1]])
     end
     graph.write_graph_graphml(File.open("#{@user}_#{@repo}/#{@user}_#{@repo}_#{month}.graphml", 'w'))
   end
 
-  def make_edge(graph, u1, u2)
-    u1={"name"=>u1}
-    u2={"name"=>u2}
+  def make_edge(graph, u1n, u2n)
+    return if u1n==u2n
+    @users[u1n] ||= (@uid+=1)
+    @users[u2n] ||= (@uid+=1)
+    u1 = @users[u1n]
+    u2 = @users[u2n]
     graph.add_vertices([u1,u2])
     if graph.are_connected(u1,u2)
       graph.set_edge_attr(u1,u2,{"weight"=>graph.get_edge_attr(u1,u2)["weight"]+1})

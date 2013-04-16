@@ -47,7 +47,7 @@ def update_top(n)
   query = <<-EOF
 SELECT repository_url, MAX(repository_forks) as num_forks
 FROM [githubarchive:github.timeline]
-WHERE repository_name!='' AND repository_owner!='' AND MONTH(TIMESTAMP(created_at)) == 3 AND YEAR(TIMESTAMP(created_at)) == 2012
+WHERE repository_name!='' AND repository_owner!='' AND MONTH(TIMESTAMP(created_at)) == 4 AND YEAR(TIMESTAMP(created_at)) == 2012
 GROUP BY repository_url
 ORDER BY num_forks DESC
 LIMIT #{n};
@@ -65,6 +65,7 @@ SELECT T.repository_url AS url, M.num_forks AS max_forks, MONTH(TIMESTAMP(T.crea
 YEAR(TIMESTAMP(T.created_at)) AS year, MAX(T.repository_forks) AS forks
 FROM githubarchive:github.timeline AS T
 JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
+WHERE PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
 GROUP BY url, max_forks, year, month
 ORDER BY max_forks DESC, url ASC, year DESC, month DESC;
   EOF
@@ -98,35 +99,65 @@ ORDER BY max_forks DESC, url ASC, year DESC, month DESC;
   puts "Finished writing in #{Time.now-clock}"
 end
 
+module Enumerable
+  def customsort(*args)
+    sort do |a,b|
+      i, res = -1, 0
+      res = a[0][i]<=>b[0][i] until !res.zero? or (i+=1)==a[0].size
+      args[i] ? res : -res
+    end
+  end
+end
 
 def get_event_stream(n,m=false,l=false,t=false)
   query = <<-EOF
 SELECT T.repository_url AS url, M.num_forks AS forks, T.created_at AS timestamp, T.type AS event
 FROM githubarchive:github.timeline AS T
 JOIN mygithubarchives.top_#{n}_repos AS M ON T.repository_url=M.repository_url
-#{"WHERE T.type='PushEvent' OR T.type='PullRequestEvent' OR T.type='IssuesEvent'" if l}
+WHERE PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
+AND PARSE_UTC_USEC(created_at) < PARSE_UTC_USEC('2013-04-01 00:00:00')
+#{"AND (T.type='PushEvent' OR T.type='PullRequestEvent' OR T.type='IssuesEvent')" if l}
 ORDER BY forks DESC, url ASC, timestamp ASC;
   EOF
   puts "Beginning event_stream query"
   clock = Time.now
-  output = `bq --format json -q query --max_rows 99999999 "#{query}"`
+  if File.exists?("temp-#{n}-#{l}.json")
+    output = File.read("temp-#{n}-#{l}.json")
+  else
+    output = `bq --format json -q query --max_rows 99999999 "#{query}"`
+    File.open("temp-#{n}-#{l}.json",'w'){|f| f.puts output}
+  end
   puts "Finished query in #{Time.now-clock}"
   puts "Parsing JSON"
   clock = Time.now
   x = JSON.parse(output)
   output = nil #Allows that memory to be garbage collected
   GC.start #Force it to be garbage collected, to get that giant string(Hundreds of millions of chars) out of memory.
-  puts "Finish first parse"
   puts "Length: #{x.length}"
   x = x.group_by do |row|
     repo = row["url"].match(/https:\/\/github.com\/(.*)/)[1]
     if m
-      t = Date.parse(row["timestamp"])
-      "#{repo}_#{t.year}_#{t.month}"
+      ts = Date.parse(row["timestamp"])
+      [row["forks"].to_i,repo,ts.year.to_i,ts.month.to_i]
     else
       repo
     end
   end
+  if m
+    #faster to group by this after initially grouping by them all together
+    #This prevents two group_by's on a very large set of data
+    #This gets a list of all the months years, to fill in ones that are missing
+    monthsyears = x.keys.group_by{|k| k[2..3]}.keys
+    #This gets a list of all the repos
+    repos = x.keys.group_by{|k| k[0..1]}.keys
+    repos.each do |r|
+      monthsyears.each do |my|
+        x[r+my] ||= []
+      end
+    end
+  end
+
+  x = x.customsort(false,true,true,true) if m
   puts "Finished parsing in #{Time.now-clock}"
   puts "Writing to file"
   clock = Time.now
@@ -136,6 +167,7 @@ ORDER BY forks DESC, url ASC, timestamp ASC;
   filename += "-m" if m
   CSV.open("#{filename}.csv", 'w') do |csv|
     csv << x.collect do |k,v|
+      k=k[1..-1].join("_") if m
       if t
         ["#{k}_events", "#{k}_timestamps"]
       else
