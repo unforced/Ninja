@@ -9,28 +9,17 @@ options={}
 OptionParser.new do |opts|
   opts.banner = "Usage: ./sna.rb [options]"
 
-  opts.on("--update_rubinius", "Updates rubinius repo in BigQuery") do
-    options[:update] = :rubinius
-  end
-
   opts.on("--update_n [NUMBER_REPOS]", Integer, "Updates the top N repositories(default 100)") do |n|
     options[:update] = n || 100
-  end
-
-  opts.on("-r", "--rubinius", "Queries rubinius repo") do
-    options[:query] = true
-    options[:rubinius] = true
-    options[:month] ||= 0
   end
 
   opts.on("-n", "--number [NUMBER_REPOS]", Integer, "Query the top N repositories(default 100)") do |n|
     options[:query] = true
     options[:number] = n || 100
-    options[:month] ||= 0
   end
 
-  opts.on("-m", "--month [MONTHS]", Integer, "Query monthly snapshots MONTHS times(default 12)") do |m|
-    options[:month] = m || 12
+  opts.on("-m", "--month", Integer, "Query monthly snapshots back to 4/2012") do
+    options[:month] = true
   end
 
   opts.on_tail("-h", "--help", "Show this help message") do
@@ -42,7 +31,7 @@ end.parse!
 class RepoGraph
   MAX_REPOS=100000
   attr_accessor :graph
-  def initialize(user, repo, month)
+  def initialize(user, repo, by_month)
     @github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
     @client = Google::APIClient.new(application_name: "SNA", application_version: "0.5")
     @bq = @client.discovered_api("bigquery", "v2")
@@ -61,36 +50,30 @@ class RepoGraph
     #repo. This will be changed back later to allow any repo
     query = <<-EOF
     SELECT *
-    FROM [mygithubarchives.rubinius_info]
+    FROM [mygithubarchives.top_repo_info]
     WHERE repository_owner='#{user}' AND repository_name='#{repo}';
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
     @repo_info, @repo_schema = get_json_query(query)
     Dir.mkdir("#{@user}_#{@repo}") unless File.exists?("#{@user}_#{@repo}")
-    0.upto(month) do |m|
+    data_start = Date.new(2012,4)
+    months = 1
+    if by_month
+      months += (Date.today.year - data_start.year)*12 + (Date.today.month - data_start.month)
+    end
+    months.times do |m|
       generate_repo_graph(m)
     end
   end
 
-  def self.update_rubinius
-    query = <<-EOF
-    SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
-    FROM [githubarchive:github.timeline]
-    WHERE repository_name='rubinius' AND repository_owner='rubinius'
-    AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
-    EOF
-    `bq rm -f mygithubarchives.rubinius_info`
-    `bq query --destination_table=mygithubarchives.rubinius_info "#{query}"`
-  end
-
-  #Retrieves the url's of the top 100 repositories
+  #Retrieves the url's of the top 100 repositories in April
   #Retrieves all necessary info on the top repositories
   #Processes approximately 15GB of data
   def self.update_top(n)
     query = <<-EOF
     SELECT repository_url, repository_name, repository_owner, MAX(repository_forks) as num_forks
     FROM [githubarchive:github.timeline]
-    WHERE repository_name!='' AND repository_owner!=''
+    WHERE repository_name!='' AND repository_owner!='' AND MONTH(TIMESTAMP(created_at)) == 4 AND YEAR(TIMESTAMP(created_at)) == 2012
     GROUP BY repository_url, repository_name, repository_owner
     ORDER BY num_forks DESC
     LIMIT #{n};
@@ -100,7 +83,7 @@ class RepoGraph
     query2 = <<-EOF
     SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
     FROM [githubarchive:github.timeline]
-    WHERE repository_url IN (SELECT repository_url FROM mygithubarchives.top_repos)
+    WHERE repository_url IN (SELECT repository_url FROM mygithubarchives.top_repos) AND PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
     AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
     EOF
     `bq rm -f mygithubarchives.top_repo_info`
@@ -143,6 +126,8 @@ class RepoGraph
 
   def generate_repo_graph(month)
     graph = IGraph.new([],false)
+    #Retrieve snapshots at the first day of the month
+    start_date = Date.new(Date.today.year, Date.today.month).prev_month(month)
     #Initialize nodes first
     graph.add_vertices(@users.values)
     monthly_repo_info = @repo_info.select do |e|
@@ -201,7 +186,7 @@ class RepoGraph
     pr_comments.each do |pc|
       make_edge(graph, r(pc,"actor"), open_users[r(pc,"url").match(/\/pull\/(\d+)#/)[1]])
     end
-    graph.write_graph_graphml(File.open("#{@user}_#{@repo}/#{@user}_#{@repo}_#{month}.graphml", 'w'))
+    graph.write_graph_graphml(File.open("#{@user}_#{@repo}/#{@user}_#{@repo}_#{start_date.year}_#{start_date.month.to_s.rjust(2,'0')}.graphml", 'w'))
   end
 
   def make_edge(graph, u1n, u2n)
@@ -222,17 +207,13 @@ end
 if options[:update]
   if options[:update].class == Fixnum
     RepoGraph.update_top(options[:update])
-  elsif options[:update] == :rubinius
-    RepoGraph.update_rubinius
   else
     raise ArgumentError
   end
 end
 
 if options[:query]
-  if options[:rubinius]
-    RepoGraph.new("rubinius", "rubinius", options[:month])
-  elsif options[:number]
+  if options[:number]
     RepoGraph.get_top(options[:number], options[:month])
   else
     raise ArgumentError
