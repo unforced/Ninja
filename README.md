@@ -1,4 +1,10 @@
-Data Aggregator - Specifications
+# Data Aggregator - Specifications
+
+### External Links
+
+All output files generated are hosted [on dropbox](https://www.dropbox.com/sh/ee9vkizsa5imw7z/oxpmmNnQDs)
+A web interface for viewing the time series graphs of repository graphs can be
+seen in my [Ninja-browser repository](https://github.com/Aaronneyer/Ninja-browser)
 
 ### Objectives
 
@@ -83,8 +89,8 @@ For BigQuery, to save time and money on data processed, we will first
 pull the top 100 repositories (number can vary). From there we pull only
 the columns we need, on just the top 100 repositories, and store that
 dataset in BigQuery. This dataset is only 140MB which dramatically
-reduces costs, as it is \$0.12 per GB of storage per month and \$0.035
-per GB processed with queries. Updating the dataset processes \~16GB of
+reduces costs, as it is $0.12 per GB of storage per month and $0.035
+per GB processed with queries. Updating the dataset processes ~16GB of
 data.
 
 ### BigQuery Data
