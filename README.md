@@ -2,7 +2,8 @@
 
 ### External Links
 
-All output files generated are hosted [on dropbox](https://www.dropbox.com/sh/ee9vkizsa5imw7z/oxpmmNnQDs)
+All output files generated are hosted [on dropbox](https://www.dropbox.com/sh/ee9vkizsa5imw7z/oxpmmNnQDs).
+
 A web interface for viewing the time series graphs of repository graphs can be
 seen in my [Ninja-browser repository](https://github.com/Aaronneyer/Ninja-browser)
 
