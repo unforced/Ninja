@@ -4,12 +4,13 @@ require 'google/api_client'
 require 'github_api'
 require 'optparse'
 require 'igraph'
+require 'json'
 
 options={}
 OptionParser.new do |opts|
   opts.banner = "Usage: ./sna.rb [options]"
 
-  opts.on("--update_n [NUMBER_REPOS]", Integer, "Updates the top N repositories(default 100)") do |n|
+  opts.on("-u", "--update_n [NUMBER_REPOS]", Integer, "Updates the top N repositories(default 100)") do |n|
     options[:update] = n || 100
   end
 
@@ -18,7 +19,7 @@ OptionParser.new do |opts|
     options[:number] = n || 100
   end
 
-  opts.on("-m", "--month", Integer, "Query monthly snapshots back to 4/2012") do
+  opts.on("-m", "--month", "Query monthly snapshots back to 4/2012") do
     options[:month] = true
   end
 
@@ -31,31 +32,31 @@ end.parse!
 class RepoGraph
   MAX_REPOS=100000
   attr_accessor :graph
+  @@github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
+  @@client = Google::APIClient.new(application_name: "SNA", application_version: "0.5")
+  @@bq = @@client.discovered_api("bigquery", "v2")
+  key = Google::APIClient::PKCS12.load_key("client.p12", "notasecret")
+  @@client.authorization = Signet::OAuth2::Client.new(token_credential_uri: 'https://accounts.google.com/o/oauth2/token',
+                                                     audience: 'https://accounts.google.com/o/oauth2/token',
+                                                     scope: 'https://www.googleapis.com/auth/bigquery',
+                                                     issuer: '1017723978940@developer.gserviceaccount.com',
+                                                     signing_key: key)
+  @@client.authorization.fetch_access_token!
   def initialize(user, repo, by_month)
-    @github = Github.new(oauth_token: "d72762df620b07c1ca9dab8b62b3935087d71e1c")
-    @client = Google::APIClient.new(application_name: "SNA", application_version: "0.5")
-    @bq = @client.discovered_api("bigquery", "v2")
-    key = Google::APIClient::PKCS12.load_key("client.p12", "notasecret")
-    @client.authorization = Signet::OAuth2::Client.new(token_credential_uri: 'https://accounts.google.com/o/oauth2/token',
-                                                       audience: 'https://accounts.google.com/o/oauth2/token',
-                                                       scope: 'https://www.googleapis.com/auth/bigquery',
-                                                       issuer: '1017723978940@developer.gserviceaccount.com',
-                                                       signing_key: key)
-    @client.authorization.fetch_access_token!
     @user = user
     @repo = repo
     @users = {}
     @uid = 0
-    #This query will use <1MB of data and retrieve all the info on our given
-    #repo. This will be changed back later to allow any repo
     query = <<-EOF
     SELECT *
     FROM [mygithubarchives.top_repo_info]
     WHERE repository_owner='#{user}' AND repository_name='#{repo}';
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
+    puts "Querying for #{user} #{repo}"
     @repo_info, @repo_schema = get_json_query(query)
-    Dir.mkdir("#{@user}_#{@repo}") unless File.exists?("#{@user}_#{@repo}")
+    @dir = "output_files/graphs/#{@user}_#{@repo}"
+    Dir.mkdir(@dir) unless File.exists?(@dir)
     data_start = Date.new(2012,4)
     months = 1
     if by_month
@@ -97,10 +98,9 @@ class RepoGraph
     ORDER BY num_forks DESC
     LIMIT #{n}
     EOF
-    top=get_json_query(query)
+    top = JSON.parse(`bq --format json -q query --max_rows 10000 "#{query}"`)
     top.each do |r|
       RepoGraph.new(r["repository_owner"], r["repository_name"], m)
-      puts "Finished #{repository_owner}_#{repository_name}"
     end
   end
 
@@ -109,13 +109,18 @@ class RepoGraph
   #repository_name, repository_owner, repository_url, type, url]
   def get_json_query(query)
     #Makes the call to big query and parses the JSON returned
-    data = @client.execute(api_method: @bq.jobs.query, body_object: {query: query},
-                           parameters: {projectId: "githubsna"}).data
-    puts "Used #{data["total_bytes_processed"]} bytes of data"
-    puts "Returned #{data["total_rows"]} rows"
-    schema = {}
-    data.schema.fields.each_with_index do |f,i|
-      schema[f.name]=i
+    begin
+      data = @@client.execute(api_method: @@bq.jobs.query, body_object: {query: query},
+                              parameters: {projectId: "githubsna"}).data
+      puts "Used #{data["total_bytes_processed"]} bytes of data"
+      puts "Returned #{data["total_rows"]} rows"
+      schema = {}
+      data.schema.fields.each_with_index do |f,i|
+        schema[f.name]=i
+      end
+    rescue
+      puts "Retrying #{query}"
+      retry
     end
     [data.rows, schema]
   end
@@ -146,7 +151,7 @@ class RepoGraph
     shas = commit_comments.collect{|c| r(c, "payload_commit")}.uniq
     commits = shas.collect do |sha|
       begin
-        @github.repos.commits.get(@user, @repo, sha)
+        @@github.repos.commits.get(@user, @repo, sha)
       rescue
         nil
       end
@@ -186,13 +191,13 @@ class RepoGraph
     pr_comments.each do |pc|
       make_edge(graph, r(pc,"actor"), open_users[r(pc,"url").match(/\/pull\/(\d+)#/)[1]])
     end
-    graph.write_graph_graphml(File.open("#{@user}_#{@repo}/#{@user}_#{@repo}_#{start_date.year}_#{start_date.month.to_s.rjust(2,'0')}.graphml", 'w'))
+    graph.write_graph_graphml(File.open("#{@dir}/#{@user}_#{@repo}_#{start_date.year}_#{start_date.month.to_s.rjust(2,'0')}.graphml", 'w'))
   end
 
   def make_edge(graph, u1n, u2n)
     return if u1n==u2n
-    @users[u1n] ||= (@uid+=1)
-    @users[u2n] ||= (@uid+=1)
+    @users[u1n] ||= {"label" => u1n}
+    @users[u2n] ||= {"label" => u2n}
     u1 = @users[u1n]
     u2 = @users[u2n]
     graph.add_vertices([u1,u2])
