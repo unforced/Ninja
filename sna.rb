@@ -195,7 +195,7 @@ class RepoGraph
   end
 
   def make_edge(graph, u1n, u2n)
-    return if u1n==u2n
+    return if u1n==u2n || u1n.empty? || u2n.empty?
     @users[u1n] ||= {"label" => u1n}
     @users[u2n] ||= {"label" => u2n}
     u1 = @users[u1n]
