@@ -1,11 +1,11 @@
-# Data Aggregator - Specifications
+# Github Ninja Data Aggregator - Specifications
 
 ### External Links
 
 All output files generated are hosted [on dropbox](https://www.dropbox.com/sh/8vg37wmfh68gbyv/GmnQ7xH0vu).
 
 A web interface for viewing the time series graphs of repository graphs can be
-seen in my [Ninja-browser repository](https://github.com/Aaronneyer/Ninja-browser)
+seen in my [Ninja-viewer repository](https://github.com/Aaronneyer/Ninja-viewer)
 
 ### Objectives
 
