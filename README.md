@@ -1,4 +1,4 @@
-# Github Ninja Data Aggregator - Specifications
+# Github Ninja
 
 ### External Links
 
