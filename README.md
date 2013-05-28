@@ -99,16 +99,16 @@ data.
 When we query the bigquery data, we want to limit our requests to
 specific events, and we only need information on certain fields:
 
-| Field | Description | Used For |
-| ----- | ----------- | -------- |
-| actor | The user involved in this event | Gives the name of a node |
-| payload\_action | Specifies what action was performed during this event | Used to identify opened/closed on issues and pull requests |
-| type | What the github event was | Differentiates types of events so we can handle them differently |
-| payload\_commit | sha of commit for this comment | Used with GithubAPI to retrieve the commit for this comment |
-| payload\_number | The number that identifies this PR or Issue | Used to match opened/closed PR’s and Issues |
-| url | The URL for this event | Used for retrieving the payload\_number for pull request comments, which don’t have it listed |
-| repository\_name | Name of repository | Necessary because we retrieve information on repositories one at a time |
-| repository\_owner | Owner of repository | Ditto above |
+| Field             | Description                                           | Used For                                                                                      |
+| -----             | -----------                                           | --------                                                                                      |
+| actor             | The user involved in this event                       | Gives the name of a node                                                                      |
+| payload\_action   | Specifies what action was performed during this event | Used to identify opened/closed on issues and pull requests                                    |
+| type              | What the github event was                             | Differentiates types of events so we can handle them differently                              |
+| payload\_commit   | sha of commit for this comment                        | Used with GithubAPI to retrieve the commit for this comment                                   |
+| payload\_number   | The number that identifies this PR or Issue           | Used to match opened/closed PR’s and Issues                                                   |
+| url               | The URL for this event                                | Used for retrieving the payload\_number for pull request comments, which don’t have it listed |
+| repository\_name  | Name of repository                                    | Necessary because we retrieve information on repositories one at a time                       |
+| repository\_owner | Owner of repository                                   | Ditto above                                                                                   |
 
 Processing each event:
 

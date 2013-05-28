@@ -23,10 +23,16 @@ OptionParser.new do |opts|
     options[:month] = true
   end
 
+  opts.on("-q", "--query [OWNER/REPO]", String, "Query a single repository") do |r|
+    options[:query] = true
+    options[:owner], options[:repo] = r.split("/", 2)
+  end
+
   opts.on_tail("-h", "--help", "Show this help message") do
     puts opts
     exit
   end
+
 end.parse!
 
 class RepoGraph
@@ -42,19 +48,20 @@ class RepoGraph
                                                      issuer: '1017723978940@developer.gserviceaccount.com',
                                                      signing_key: key)
   @@client.authorization.fetch_access_token!
-  def initialize(user, repo, by_month)
+  def initialize(user, repo, by_month, single_lookup)
     @user = user
     @repo = repo
     @users = {}
     @uid = 0
+    lookup_repo = single_lookup ? "[githubarchive:github.timeline]" : "[mygithubarchives.top_repo_info]"
     query = <<-EOF
     SELECT *
-    FROM [mygithubarchives.top_repo_info]
-    WHERE repository_owner='#{user}' AND repository_name='#{repo}';
+    FROM #{lookup_repo}
+    WHERE repository_owner='#{user}' AND repository_name='#{repo}' AND PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
     EOF
     #Retrieves all necessary info for a repo and sorts it by event type
     puts "Querying for #{user} #{repo}"
-    @repo_info, @repo_schema = get_json_query(query)
+    @repo_info, @repo_schema = RepoGraph.get_json_query(query)
     @dir = "output_files/graphs/#{@user}_#{@repo}"
     Dir.mkdir(@dir) unless File.exists?(@dir)
     data_start = Date.new(2012,4)
@@ -72,15 +79,16 @@ class RepoGraph
   #Processes approximately 15GB of data
   def self.update_top(n)
     query = <<-EOF
-    SELECT repository_url, repository_name, repository_owner, MAX(repository_forks) as num_forks
+    SELECT repository_name, COUNT(repository_name) as activities, repository_owner, repository_url
     FROM [githubarchive:github.timeline]
-    WHERE repository_name!='' AND repository_owner!='' AND MONTH(TIMESTAMP(created_at)) == 4 AND YEAR(TIMESTAMP(created_at)) == 2012
-    GROUP BY repository_url, repository_name, repository_owner
-    ORDER BY num_forks DESC
-    LIMIT #{n};
+    WHERE (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent')
+    AND PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
+    GROUP BY repository_name, repository_owner, repository_url
+    ORDER BY activities DESC
+    LIMIT #{n}
     EOF
     `bq rm -f mygithubarchives.top_repos`
-    `bq query --destination_table=mygithubarchives.top_repos "#{query}"`
+    puts `bq query --destination_table=mygithubarchives.top_repos "#{query}"`
     query2 = <<-EOF
     SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
     FROM [githubarchive:github.timeline]
@@ -88,26 +96,26 @@ class RepoGraph
     AND (type='CommitCommentEvent' OR type='IssueCommentEvent' OR type='IssuesEvent' OR type='PullRequestEvent' OR type='PullRequestReviewCommentEvent');
     EOF
     `bq rm -f mygithubarchives.top_repo_info`
-    `bq query --destination_table=mygithubarchives.top_repo_info "#{query2}"`
+    puts `bq query --destination_table=mygithubarchives.top_repo_info "#{query2}"`
   end
 
   def self.get_top(n, m)
     query = <<-EOF
-    SELECT repository_url, repository_name, repository_owner, num_forks
+    SELECT repository_url, repository_name, repository_owner, activities
     FROM [mygithubarchives.top_repos]
-    ORDER BY num_forks DESC
+    ORDER BY activities DESC
     LIMIT #{n}
     EOF
-    top = JSON.parse(`bq --format json -q query --max_rows 10000 "#{query}"`)
-    top.each do |r|
-      RepoGraph.new(r["repository_owner"], r["repository_name"], m)
+    top, schema = get_json_query(query)
+    top.each do |row|
+      RepoGraph.new(row.f[schema["repository_owner"]].v, row.f[schema["repository_name"]].v, m, false)
     end
   end
 
   #Schema:
   #[actor, created_at, payload_action, payload_commit, payload_number,
   #repository_name, repository_owner, repository_url, type, url]
-  def get_json_query(query)
+  def self.get_json_query(query)
     #Makes the call to big query and parses the JSON returned
     begin
       data = @@client.execute(api_method: @@bq.jobs.query, body_object: {query: query},
@@ -220,6 +228,8 @@ end
 if options[:query]
   if options[:number]
     RepoGraph.get_top(options[:number], options[:month])
+  elsif options[:owner] && options[:repo]
+    RepoGraph.new(options[:owner], options[:repo], options[:month], true)
   else
     raise ArgumentError
   end
