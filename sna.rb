@@ -55,7 +55,7 @@ class RepoGraph
     @uid = 0
     lookup_repo = single_lookup ? "[githubarchive:github.timeline]" : "[mygithubarchives.top_repo_info]"
     query = <<-EOF
-    SELECT *
+    SELECT actor, created_at, payload_action, type, payload_commit, payload_number, url, repository_url, repository_name, repository_owner
     FROM #{lookup_repo}
     WHERE repository_owner='#{user}' AND repository_name='#{repo}' AND PARSE_UTC_USEC(created_at) >= PARSE_UTC_USEC('2012-04-01 00:00:00')
     EOF
